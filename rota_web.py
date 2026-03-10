@@ -5,8 +5,7 @@ import io
 import csv
 
 # --- CORE ALGORITHM ---
-# (This remains exactly the same mathematical brain as before)
-def generate_schedule_with_suggestions(num_weeks, slots_per_week, employee_needs, employee_preferences):
+def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_needs, employee_preferences):
     prob = pulp.LpProblem("Fair_Scheduling_With_Flags", pulp.LpMinimize)
     employees = list(employee_needs.keys())
     weeks = list(range(1, num_weeks + 1))
@@ -27,8 +26,9 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week, employee_needs
     for emp in employees:
         prob += pulp.lpSum(x[emp, w] for w in weeks) == employee_needs[emp]
         
+    # UPDATED CONSTRAINT: Now checks against the specific capacity mapped to each week
     for w in weeks:
-        prob += pulp.lpSum(x[emp, w] for emp in employees) <= slots_per_week
+        prob += pulp.lpSum(x[emp, w] for emp in employees) <= slots_per_week_map[w]
         
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
     
@@ -50,30 +50,42 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week, employee_needs
 
 # --- STREAMLIT WEB UI ---
 
-# 1. Page Configuration
 st.set_page_config(page_title="KEN Scheduler", layout="centered")
 st.title("KEN: Key Equity Navigator")
 st.write("Upload your employee data or type it below to generate an optimal, mathematically fair schedule.")
 
-# 2. Parameters
+# 1. Base Parameters
 col1, col2 = st.columns(2)
 with col1:
     num_weeks = st.number_input("Total Weeks", min_value=1, value=4, step=1)
 with col2:
-    slots_per_week = st.number_input("Slots Per Week", min_value=1, value=2, step=1)
+    default_slots = st.number_input("Default Slots Per Week", min_value=1, value=2, step=1)
+
+# 2. Advanced Slot Configuration
+st.write("") # Spacer
+advanced_slots = st.checkbox("⚙️ Advanced: Set slots for each week individually")
+slots_per_week_map = {}
+
+if advanced_slots:
+    st.info("Override the default capacity for specific weeks below:")
+    # Create a dynamic grid of inputs based on the number of weeks
+    grid_cols = st.columns(4) 
+    for w in range(1, num_weeks + 1):
+        with grid_cols[(w - 1) % 4]:
+            slots_per_week_map[w] = st.number_input(f"Week {w} Slots", min_value=0, value=default_slots, step=1, key=f"slot_{w}")
+else:
+    # If the box isn't checked, apply the default slots to every week
+    for w in range(1, num_weeks + 1):
+        slots_per_week_map[w] = default_slots
 
 st.divider()
 
 # 3. Data Input
 st.subheader("1. Input Employee Data")
 
-# CSV File Uploader
 uploaded_file = st.file_uploader("Load from CSV (Optional)", type=["csv"])
-
-# Default fallback text
 default_text = "Alice; 2; 1, 2, 4\nBob; 2; 2, 4, 1\nCharlie; 2; 4, 1, 2\nDiana; 2; 1, 4, 2"
 
-# If a user uploads a CSV, read it and format it into the text box automatically
 if uploaded_file is not None:
     stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8-sig"))
     reader = csv.reader(stringio)
@@ -101,7 +113,6 @@ if st.button("Generate Fair Schedule", type="primary"):
     preferences = {}
     error = False
     
-    # Parse the text box
     lines = raw_data.strip().split('\n')
     for line in lines:
         if not line.strip():
@@ -123,17 +134,16 @@ if st.button("Generate Fair Schedule", type="primary"):
             error = True
             break
             
-    # Run the math if parsing was successful
     if not error:
         with st.spinner("Calculating optimal schedule..."):
-            schedule, suggestions = generate_schedule_with_suggestions(num_weeks, slots_per_week, needs, preferences)
+            # Pass the new dynamic map into the algorithm instead of a static integer
+            schedule, suggestions = generate_schedule_with_suggestions(num_weeks, slots_per_week_map, needs, preferences)
             
         if schedule is None:
-            st.error("ERROR: Impossible constraints. Not enough total slots to fulfill everyone's required weeks.")
+            st.error("ERROR: Impossible constraints. Not enough total slots available to fulfill everyone's required weeks.")
         else:
             st.success("Schedule generated successfully!")
             
-            # Build clean data tables for the web display
             sched_data = []
             for w in range(1, num_weeks + 1):
                 emps = schedule.get(w, [])
@@ -142,7 +152,6 @@ if st.button("Generate Fair Schedule", type="primary"):
             st.markdown("### Confirmed Schedule")
             st.table(pd.DataFrame(sched_data))
             
-            # Process suggestions
             issues_found = False
             sugg_data = []
             for w in range(1, num_weeks + 1):
@@ -157,7 +166,6 @@ if st.button("Generate Fair Schedule", type="primary"):
             else:
                 st.info("All slots filled perfectly based on employee preferences!")
                 
-            # Build the downloadable CSV file
             output_df = pd.DataFrame(sched_data)
             if issues_found:
                 gap_df = pd.DataFrame([{"Week": "---", "Status": "---", "Employees": "---"}])
@@ -165,7 +173,6 @@ if st.button("Generate Fair Schedule", type="primary"):
                 
             csv_export = output_df.to_csv(index=False).encode('utf-8')
             
-            # Download Button (replaces the complicated filedialog)
             st.download_button(
                 label="Download Results as CSV",
                 data=csv_export,
