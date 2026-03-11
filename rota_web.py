@@ -85,8 +85,8 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_n
 # --- STREAMLIT WEB UI ---
 
 st.set_page_config(page_title="KEN Scheduler", layout="centered")
-st.title("KEN: Key Equity Navigator")
-st.write("Upload your employee data or type it below to generate an optimal, mathematically fair schedule.")
+st.title("Key Equity Navigator (KEN)")
+st.write("Fairness weighted ROTA Scheduler")
 
 # 1. Base Parameters
 col1, col2 = st.columns(2)
@@ -223,3 +223,4 @@ if st.button("Generate Fair Schedule", type="primary"):
                 file_name="KEN_Schedule_Export.csv",
                 mime="text/csv",
             )
+
