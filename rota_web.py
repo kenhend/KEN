@@ -12,8 +12,14 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_n
     costs = {}
     for emp in employees:
         costs[emp] = {}
+        # Check if the employee left their preferences completely blank
+        is_flexible = len(employee_preferences[emp]) == 0
+        
         for w in weeks:
-            if w in employee_preferences[emp]:
+            if is_flexible:
+                # Give all weeks an equal, lowest-penalty score (1st choice weight)
+                costs[emp][w] = 1 
+            elif w in employee_preferences[emp]:
                 costs[emp][w] = employee_preferences[emp].index(w) + 1
             else:
                 costs[emp][w] = 100 
@@ -35,10 +41,9 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_n
         return None, None, None
         
     optimal_base_cost = pulp.value(prob1.objective)
-    final_variables = x1 # Default to Pass 1 results
+    final_variables = x1 
     
     # --- PASS 2: Apply Seniority within the 15% Threshold ---
-    # This ONLY runs if the checkbox in the UI is checked
     if use_seniority:
         prob2 = pulp.LpProblem("Pass2_SeniorityWeighted", pulp.LpMinimize)
         x2 = pulp.LpVariable.dicts("assign2", ((emp, w) for emp in employees for w in weeks), cat='Binary')
@@ -63,14 +68,18 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_n
     # --- EXTRACT RESULTS & CALCULATE SCORECARD ---
     schedule = {w: [] for w in weeks}
     suggestions = {w: [] for w in weeks}
-    scorecard = {"1st Choice": 0, "2nd Choice": 0, "3rd Choice": 0, "4th+ Choice": 0, "Unpreferred": 0}
+    scorecard = {"1st Choice": 0, "2nd Choice": 0, "3rd Choice": 0, "4th+ Choice": 0, "Flexible": 0, "Unpreferred": 0}
     
     for w in weeks:
         for emp in employees:
             if pulp.value(final_variables[emp, w]) == 1.0:
-                if w in employee_preferences[emp]:
+                is_flexible = len(employee_preferences[emp]) == 0
+                
+                if is_flexible:
                     schedule[w].append(emp)
-                    # Tally the scorecard
+                    scorecard["Flexible"] += 1
+                elif w in employee_preferences[emp]:
+                    schedule[w].append(emp)
                     rank = employee_preferences[emp].index(w) + 1
                     if rank == 1: scorecard["1st Choice"] += 1
                     elif rank == 2: scorecard["2nd Choice"] += 1
@@ -85,8 +94,8 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_n
 # --- STREAMLIT WEB UI ---
 
 st.set_page_config(page_title="KEN Scheduler", layout="centered")
-st.title("Key Equity Navigator (KEN)")
-st.write("Fairness weighted ROTA Scheduler")
+st.title("KEN: Key Equity Navigator")
+st.write("Upload your employee data or type it below to generate an optimal, mathematically fair schedule.")
 
 # 1. Base Parameters
 col1, col2 = st.columns(2)
@@ -118,7 +127,7 @@ st.divider()
 st.subheader("1. Input Employee Data")
 
 uploaded_file = st.file_uploader("Load from CSV (Optional)", type=["csv"])
-default_text = "Alice; 2; 1, 2, 4\nBob; 2; 2, 4, 1\nCharlie; 2; 4, 1, 2\nDiana; 2; 1, 4, 2"
+default_text = "Alice; 2; 1, 2, 4\nBob; 2; 2, 4, 1\nCharlie; 2; \nDiana; 2; 1, 4, 2" # Added Charlie as flexible in default
 
 if uploaded_file is not None:
     stringio = io.StringIO(uploaded_file.getvalue().decode("utf-8-sig"))
@@ -135,7 +144,7 @@ if uploaded_file is not None:
         new_text += f"{name}; {needs}; {prefs}\n"
     default_text = new_text.strip()
 
-st.write("Format: `Name; Weeks Needed; Pref1, Pref2, Pref3`")
+st.write("Format: `Name; Weeks Needed; Pref1, Pref2, Pref3` (Leave preferences blank if flexible)")
 raw_data = st.text_area("Employee Data Box", value=default_text, height=150)
 
 st.divider()
@@ -152,15 +161,22 @@ if st.button("Generate Fair Schedule", type="primary"):
         if not line.strip():
             continue
         parts = line.split(';')
-        if len(parts) != 3:
-            st.error(f"Format error on line: {line}. Make sure you are using semicolons.")
+        
+        # Updated to allow missing third section
+        if len(parts) < 2:
+            st.error(f"Format error on line: {line}. Make sure you have at least a Name and Weeks Needed.")
             error = True
             break
         
         try:
             name = parts[0].strip()
             emp_needs = int(parts[1].strip())
-            emp_prefs = [int(p.strip()) for p in parts[2].split(',') if p.strip()]
+            
+            # If they provided preferences, parse them; otherwise, empty list
+            emp_prefs = []
+            if len(parts) >= 3 and parts[2].strip():
+                emp_prefs = [int(p.strip()) for p in parts[2].split(',') if p.strip()]
+                
             needs[name] = emp_needs
             preferences[name] = emp_prefs
         except ValueError:
@@ -179,13 +195,14 @@ if st.button("Generate Fair Schedule", type="primary"):
             
             # --- DISPLAY SCORECARD ---
             st.markdown("### 📊 Fairness Scorecard")
-            sc_cols = st.columns(5)
+            sc_cols = st.columns(6) # Expanded to 6 columns to fit the "Flexible" metric
             sc_cols[0].metric("1st Choices", scorecard["1st Choice"])
             sc_cols[1].metric("2nd Choices", scorecard["2nd Choice"])
             sc_cols[2].metric("3rd Choices", scorecard["3rd Choice"])
             sc_cols[3].metric("4th+ Choices", scorecard["4th+ Choice"])
-            sc_cols[4].metric("Unpreferred", scorecard["Unpreferred"])
-            st.write("") # Spacer
+            sc_cols[4].metric("Flexible", scorecard["Flexible"])
+            sc_cols[5].metric("Unpreferred", scorecard["Unpreferred"])
+            st.write("") 
             
             # --- DISPLAY SCHEDULE ---
             sched_data = []
@@ -223,4 +240,3 @@ if st.button("Generate Fair Schedule", type="primary"):
                 file_name="KEN_Schedule_Export.csv",
                 mime="text/csv",
             )
-
