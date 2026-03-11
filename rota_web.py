@@ -5,8 +5,7 @@ import io
 import csv
 
 # --- CORE ALGORITHM ---
-def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_needs, employee_preferences):
-    prob = pulp.LpProblem("Fair_Scheduling_With_Flags", pulp.LpMinimize)
+def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_needs, employee_preferences, use_seniority=False):
     employees = list(employee_needs.keys())
     weeks = list(range(1, num_weeks + 1))
     
@@ -19,40 +18,75 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_n
             else:
                 costs[emp][w] = 100 
                 
-    x = pulp.LpVariable.dicts("assign", ((emp, w) for emp in employees for w in weeks), cat='Binary')
+    # --- PASS 1: Calculate the absolute optimal team fairness ---
+    prob1 = pulp.LpProblem("Pass1_BaseFairness", pulp.LpMinimize)
+    x1 = pulp.LpVariable.dicts("assign1", ((emp, w) for emp in employees for w in weeks), cat='Binary')
     
-    prob += pulp.lpSum(costs[emp][w] * x[emp, w] for emp in employees for w in weeks)
+    prob1 += pulp.lpSum(costs[emp][w] * x1[emp, w] for emp in employees for w in weeks)
     
     for emp in employees:
-        prob += pulp.lpSum(x[emp, w] for w in weeks) == employee_needs[emp]
-        
-    # UPDATED CONSTRAINT: Now checks against the specific capacity mapped to each week
+        prob1 += pulp.lpSum(x1[emp, w] for w in weeks) == employee_needs[emp]
     for w in weeks:
-        prob += pulp.lpSum(x[emp, w] for emp in employees) <= slots_per_week_map[w]
+        prob1 += pulp.lpSum(x1[emp, w] for emp in employees) <= slots_per_week_map[w]
         
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
+    prob1.solve(pulp.PULP_CBC_CMD(msg=0))
     
-    if prob.status != pulp.LpStatusOptimal:
-        return None, None
+    if prob1.status != pulp.LpStatusOptimal:
+        return None, None, None
         
+    optimal_base_cost = pulp.value(prob1.objective)
+    final_variables = x1 # Default to Pass 1 results
+    
+    # --- PASS 2: Apply Seniority within the 15% Threshold ---
+    # This ONLY runs if the checkbox in the UI is checked
+    if use_seniority:
+        prob2 = pulp.LpProblem("Pass2_SeniorityWeighted", pulp.LpMinimize)
+        x2 = pulp.LpVariable.dicts("assign2", ((emp, w) for emp in employees for w in weeks), cat='Binary')
+        
+        total_emps = len(employees)
+        weights = {emp: total_emps - i for i, emp in enumerate(employees)}
+        
+        prob2 += pulp.lpSum(weights[emp] * costs[emp][w] * x2[emp, w] for emp in employees for w in weeks)
+        
+        for emp in employees:
+            prob2 += pulp.lpSum(x2[emp, w] for w in weeks) == employee_needs[emp]
+        for w in weeks:
+            prob2 += pulp.lpSum(x2[emp, w] for emp in employees) <= slots_per_week_map[w]
+            
+        prob2 += pulp.lpSum(costs[emp][w] * x2[emp, w] for emp in employees for w in weeks) <= (1.15 * optimal_base_cost)
+        
+        prob2.solve(pulp.PULP_CBC_CMD(msg=0))
+        
+        if prob2.status == pulp.LpStatusOptimal:
+            final_variables = x2
+
+    # --- EXTRACT RESULTS & CALCULATE SCORECARD ---
     schedule = {w: [] for w in weeks}
     suggestions = {w: [] for w in weeks}
+    scorecard = {"1st Choice": 0, "2nd Choice": 0, "3rd Choice": 0, "4th+ Choice": 0, "Unpreferred": 0}
     
     for w in weeks:
         for emp in employees:
-            if pulp.value(x[emp, w]) == 1.0:
+            if pulp.value(final_variables[emp, w]) == 1.0:
                 if w in employee_preferences[emp]:
                     schedule[w].append(emp)
+                    # Tally the scorecard
+                    rank = employee_preferences[emp].index(w) + 1
+                    if rank == 1: scorecard["1st Choice"] += 1
+                    elif rank == 2: scorecard["2nd Choice"] += 1
+                    elif rank == 3: scorecard["3rd Choice"] += 1
+                    else: scorecard["4th+ Choice"] += 1
                 else:
                     suggestions[w].append(emp)
+                    scorecard["Unpreferred"] += 1
                     
-    return schedule, suggestions
+    return schedule, suggestions, scorecard
 
 # --- STREAMLIT WEB UI ---
 
 st.set_page_config(page_title="KEN Scheduler", layout="centered")
-st.title("Key Equity Navigator (KEN)")
-st.write("Make a mathematically fair ROTA schedule.")
+st.title("KEN: Key Equity Navigator")
+st.write("Upload your employee data or type it below to generate an optimal, mathematically fair schedule.")
 
 # 1. Base Parameters
 col1, col2 = st.columns(2)
@@ -61,22 +95,22 @@ with col1:
 with col2:
     default_slots = st.number_input("Default Slots Per Week", min_value=1, value=2, step=1)
 
-# 2. Advanced Slot Configuration
-st.write("") # Spacer
-advanced_slots = st.checkbox("⚙️ Advanced: Set slots for each week individually")
-slots_per_week_map = {}
-
-if advanced_slots:
-    st.info("Override the default capacity for specific weeks below:")
-    # Create a dynamic grid of inputs based on the number of weeks
-    grid_cols = st.columns(4) 
-    for w in range(1, num_weeks + 1):
-        with grid_cols[(w - 1) % 4]:
-            slots_per_week_map[w] = st.number_input(f"Week {w} Slots", min_value=0, value=default_slots, step=1, key=f"slot_{w}")
-else:
-    # If the box isn't checked, apply the default slots to every week
-    for w in range(1, num_weeks + 1):
-        slots_per_week_map[w] = default_slots
+# 2. Advanced Settings
+with st.expander("⚙️ Advanced Settings"):
+    use_seniority = st.checkbox("🎖️ Enable Seniority Weighting", help="Favors employees listed at the top, provided it doesn't drop overall team fairness by more than 15%.")
+    
+    advanced_slots = st.checkbox("📅 Set specific slot capacities for each week individually")
+    slots_per_week_map = {}
+    
+    if advanced_slots:
+        st.caption("Override the default capacity for specific weeks below:")
+        grid_cols = st.columns(4) 
+        for w in range(1, num_weeks + 1):
+            with grid_cols[(w - 1) % 4]:
+                slots_per_week_map[w] = st.number_input(f"Week {w} Slots", min_value=0, value=default_slots, step=1, key=f"slot_{w}")
+    else:
+        for w in range(1, num_weeks + 1):
+            slots_per_week_map[w] = default_slots
 
 st.divider()
 
@@ -136,20 +170,30 @@ if st.button("Generate Fair Schedule", type="primary"):
             
     if not error:
         with st.spinner("Calculating optimal schedule..."):
-            # Pass the new dynamic map into the algorithm instead of a static integer
-            schedule, suggestions = generate_schedule_with_suggestions(num_weeks, slots_per_week_map, needs, preferences)
+            schedule, suggestions, scorecard = generate_schedule_with_suggestions(num_weeks, slots_per_week_map, needs, preferences, use_seniority)
             
         if schedule is None:
             st.error("ERROR: Impossible constraints. Not enough total slots available to fulfill everyone's required weeks.")
         else:
             st.success("Schedule generated successfully!")
             
+            # --- DISPLAY SCORECARD ---
+            st.markdown("### 📊 Fairness Scorecard")
+            sc_cols = st.columns(5)
+            sc_cols[0].metric("1st Choices", scorecard["1st Choice"])
+            sc_cols[1].metric("2nd Choices", scorecard["2nd Choice"])
+            sc_cols[2].metric("3rd Choices", scorecard["3rd Choice"])
+            sc_cols[3].metric("4th+ Choices", scorecard["4th+ Choice"])
+            sc_cols[4].metric("Unpreferred", scorecard["Unpreferred"])
+            st.write("") # Spacer
+            
+            # --- DISPLAY SCHEDULE ---
             sched_data = []
             for w in range(1, num_weeks + 1):
                 emps = schedule.get(w, [])
                 sched_data.append({"Week": f"Week {w}", "Status": "Scheduled", "Employees": ", ".join(emps) if emps else "Empty"})
             
-            st.markdown("### Confirmed Schedule")
+            st.markdown("### 📅 Confirmed Schedule")
             st.table(pd.DataFrame(sched_data))
             
             issues_found = False
@@ -161,7 +205,7 @@ if st.button("Generate Fair Schedule", type="primary"):
                     sugg_data.append({"Week": f"Week {w}", "Status": "Flagged (Suggested Switch)", "Employees": ", ".join(emps)})
             
             if issues_found:
-                st.warning("### Unfilled Weeks & Fairness Suggestions")
+                st.warning("### ⚠️ Unfilled Weeks & Fairness Suggestions")
                 st.table(pd.DataFrame(sugg_data))
             else:
                 st.info("All slots filled perfectly based on employee preferences!")
@@ -179,4 +223,3 @@ if st.button("Generate Fair Schedule", type="primary"):
                 file_name="KEN_Schedule_Export.csv",
                 mime="text/csv",
             )
-
