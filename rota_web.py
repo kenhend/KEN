@@ -26,7 +26,7 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_n
                 
     # --- PASS 1: Calculate the absolute optimal team fairness ---
     prob1 = pulp.LpProblem("Pass1_BaseFairness", pulp.LpMinimize)
-    x1 = pulp.LpVariable.dicts("assign1", ((emp, w) for emp in employees for w in weeks), cat='Binary')
+    x1 = pulp.LpVariable.dict("assign1", ((emp, w) for emp in employees for w in weeks), cat='Binary')
     
     prob1 += pulp.lpSum(costs[emp][w] * x1[emp, w] for emp in employees for w in weeks)
     
@@ -46,7 +46,7 @@ def generate_schedule_with_suggestions(num_weeks, slots_per_week_map, employee_n
     # --- PASS 2: Apply Seniority within the 15% Threshold ---
     if use_seniority:
         prob2 = pulp.LpProblem("Pass2_SeniorityWeighted", pulp.LpMinimize)
-        x2 = pulp.LpVariable.dicts("assign2", ((emp, w) for emp in employees for w in weeks), cat='Binary')
+        x2 = pulp.LpVariable.dict("assign2", ((emp, w) for emp in employees for w in weeks), cat='Binary')
         
         total_emps = len(employees)
         weights = {emp: total_emps - i for i, emp in enumerate(employees)}
