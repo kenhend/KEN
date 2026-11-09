@@ -1,5 +1,5 @@
 import streamlit as st
-import pulp[cbc]
+import pulp[open_py]
 import pandas as pd
 import io
 import csv
